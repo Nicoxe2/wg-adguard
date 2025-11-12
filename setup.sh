@@ -1,18 +1,31 @@
 #!/bin/bash
 set -e
 
-# === Instalar Docker ===
-echo "[INFO] Instalando Docker..."
-curl -sSL https://get.docker.com/ | CHANNEL=stable bash
+# === Função para verificar se um comando existe ===
+check_command() {
+  command -v "$1" >/dev/null 2>&1
+}
 
-# Instalar Docker Compose plugin (caso não venha junto)
-if ! command -v docker compose &> /dev/null; then
+# === Instalar Docker apenas se não existir ===
+if check_command docker; then
+  echo "[INFO] Docker já está instalado, pulando instalação..."
+else
+  echo "[INFO] Instalando Docker..."
+  curl -sSL https://get.docker.com/ | CHANNEL=stable bash
+fi
+
+# === Instalar Docker Compose plugin apenas se não existir ===
+if check_command docker && docker compose version >/dev/null 2>&1; then
+  echo "[INFO] Docker Compose já está disponível, pulando instalação..."
+else
   echo "[INFO] Instalando Docker Compose plugin..."
   apt-get update && apt-get install -y docker-compose-plugin
 fi
 
-# Instalar Git (se não estiver presente)
-if ! command -v git &> /dev/null; then
+# === Instalar Git apenas se não existir ===
+if check_command git; then
+  echo "[INFO] Git já está instalado, pulando instalação..."
+else
   echo "[INFO] Instalando Git..."
   apt-get update && apt-get install -y git
 fi
@@ -98,7 +111,8 @@ iptables -A INPUT -p udp --dport 5053 -j ACCEPT    # Unbound UDP
 echo "[INFO] Salvando regras iptables..."
 iptables-save > /etc/iptables.rules
 
-# Criar serviço systemd para restaurar regras no boot
+# Criar serviço systemd para restaurar regras no boot (se não existir)
+if [ ! -f /etc/systemd/system/iptables-restore.service ]; then
 cat > /etc/systemd/system/iptables-restore.service <<EOF
 [Unit]
 Description=Restore iptables rules
@@ -112,20 +126,24 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOF
-
 systemctl enable iptables-restore.service
+fi
 
 # === Habilitar IP Forwarding ===
 echo "[INFO] Habilitando IP forwarding..."
 sysctl -w net.ipv4.ip_forward=1
-echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf || echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
 
 # === Inicializar Git ===
 echo "[INFO] Inicializando repositório Git..."
 cd $BASE_DIR
-git init
-git add docker-compose.yml
-git commit -m "Initial commit: WireGuard + AdGuard/Unbound setup"
+if [ ! -d ".git" ]; then
+  git init
+  git add docker-compose.yml
+  git commit -m "Initial commit: WireGuard + AdGuard/Unbound setup"
+else
+  echo "[INFO] Repositório Git já existe, pulando init..."
+fi
 
 # === Subir containers ===
 echo "[INFO] Subindo containers..."
