@@ -30,6 +30,15 @@ else
   apt-get update && apt-get install -y git
 fi
 
+# === Liberar porta 53 (remover systemd-resolved se ativo) ===
+if systemctl is-active --quiet systemd-resolved; then
+  echo "[INFO] Desativando systemd-resolved para liberar porta 53..."
+  systemctl stop systemd-resolved
+  systemctl disable systemd-resolved
+  rm -f /etc/resolv.conf
+  echo "nameserver 1.1.1.1" > /etc/resolv.conf
+fi
+
 # === Variáveis de configuração ===
 WG_HOST="SEU_IP_PUBLICO"   # altere para seu IP público ou domínio
 WG_PASSWORD="SENHA_FORTE"  # altere para sua senha
