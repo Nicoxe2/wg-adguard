@@ -19,7 +19,7 @@ Este projeto automatiza a instalação e configuração de um servidor **WireGua
 Clone este repositório e execute o script:
 
 ```bash
-git clone https://github.com/Nicoxe2/wireguard-Full.git
+git clone https://github.com/Nicoxe2/wg-adguard.git
 cd wg-adguard
 chmod +x setup.sh
 ./setup.sh
