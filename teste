@@ -1,0 +1,198 @@
+#!/bin/bash
+set -e
+
+# Cores ANSI
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+RESET='\033[0m'
+
+banner() {
+  echo -e "${CYAN}"
+  echo "========================================="
+  echo "   🚀 Setup WireGuard + AdGuard/Unbound   "
+  echo "========================================="
+  echo -e "${RESET}"
+}
+
+info() {
+  echo -e "${GREEN}[INFO]${RESET} $1"
+}
+
+warn() {
+  echo -e "${YELLOW}[WARN]${RESET} $1"
+}
+
+error() {
+  echo -e "${RED}[ERROR]${RESET} $1"
+}
+
+banner
+
+# Função para verificar se um comando existe
+check_command() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+# Instalar Docker apenas se não existir
+if check_command docker; then
+  info "Docker já está instalado, pulando instalação..."
+else
+  info "Instalando Docker..."
+  curl -sSL https://get.docker.com/ | CHANNEL=stable bash
+fi
+
+# Instalar Docker Compose plugin apenas se não existir
+if docker compose version >/dev/null 2>&1; then
+  info "Docker Compose já está disponível, pulando instalação..."
+else
+  info "Instalando Docker Compose plugin..."
+  apt-get update && apt-get install -y docker-compose-plugin
+fi
+
+# Instalar Git apenas se não existir
+if check_command git; then
+  info "Git já está instalado, pulando instalação..."
+else
+  info "Instalando Git..."
+  apt-get update && apt-get install -y git
+fi
+
+# Liberar porta 53 (remover systemd-resolved se ativo)
+if systemctl is-active --quiet systemd-resolved; then
+  warn "Desativando systemd-resolved para liberar porta 53..."
+  systemctl stop systemd-resolved
+  systemctl disable systemd-resolved
+  rm -f /etc/resolv.conf
+  echo "nameserver 1.1.1.1" > /etc/resolv.conf
+fi
+
+# Variáveis de configuração
+WG_HOST="SEU_IP_PUBLICO"   # altere para seu IP público ou domínio
+WG_PASSWORD="SENHA_FORTE"  # altere para sua senha
+BASE_DIR="$HOME/wg-adguard"
+
+# Criar diretórios de persistência
+info "Criando diretórios de persistência..."
+mkdir -p $BASE_DIR/adguard/opt-adguard-work
+mkdir -p $BASE_DIR/adguard/opt-adguard-conf
+mkdir -p $BASE_DIR/unbound
+mkdir -p $BASE_DIR/.wg-easy
+
+# Gerar docker-compose.yml
+info "Gerando docker-compose.yml..."
+cat > $BASE_DIR/docker-compose.yml <<EOF
+version: "3"
+
+services:
+  wg-easy:
+    environment:
+      - WG_HOST=${WG_HOST}
+      - PASSWORD=${WG_PASSWORD}
+      - WG_DEFAULT_DNS=10.8.1.3
+    image: weejewel/wg-easy
+    volumes:
+      - "$BASE_DIR/.wg-easy:/etc/wireguard"
+    ports:
+      - "51820:51820/udp"
+      - "51821:51821/tcp"
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+    networks:
+      wg-easy:
+        ipv4_address: 10.8.1.2
+      
+  adguard-unbound:
+    container_name: adguard-unbound
+    image: ghcr.io/hat3ph/adguard-unbound
+    restart: unless-stopped
+    hostname: adguard-unbound
+    volumes:
+      - "$BASE_DIR/adguard/opt-adguard-work:/opt/adguardhome/work"
+      - "$BASE_DIR/adguard/opt-adguard-conf:/opt/adguardhome/conf"
+      - "$BASE_DIR/unbound:/opt/unbound"
+      - "/usr/share/dns:/usr/share/dns"
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+      - "3000:3000/tcp"
+      - "80:80/tcp"
+      - "5053:5053/tcp"
+      - "5053:5053/udp"
+    networks:
+      wg-easy:
+        ipv4_address: 10.8.1.3
+
+networks:
+  wg-easy:
+    ipam:
+      config:
+        - subnet: 10.8.1.0/24
+EOF
+
+# Configurar iptables (evita duplicação)
+info "Configurando firewall..."
+for rule in \
+  "-p udp --dport 51820 -j ACCEPT" \
+  "-p tcp --dport 51821 -j ACCEPT" \
+  "-p tcp --dport 53 -j ACCEPT" \
+  "-p udp --dport 53 -j ACCEPT" \
+  "-p tcp --dport 3000 -j ACCEPT" \
+  "-p tcp --dport 80 -j ACCEPT" \
+  "-p tcp --dport 5053 -j ACCEPT" \
+  "-p udp --dport 5053 -j ACCEPT"; do
+    if ! iptables -C INPUT $rule 2>/dev/null; then
+      iptables -A INPUT $rule
+    fi
+done
+
+# Persistir regras iptables
+info "Salvando regras iptables..."
+iptables-save > /etc/iptables.rules
+
+# Criar serviço systemd para restaurar regras no boot (se não existir)
+if [ ! -f /etc/systemd/system/iptables-restore.service ]; then
+  info "Criando serviço systemd para restaurar iptables..."
+cat > /etc/systemd/system/iptables-restore.service <<EOF
+[Unit]
+Description=Restore iptables rules
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/iptables-restore /etc/iptables.rules
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable iptables-restore.service
+fi
+
+# Habilitar IP Forwarding
+info "Habilitando IP forwarding..."
+sysctl -w net.ipv4.ip_forward=1
+grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf || echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+
+# Inicializar Git
+info "Inicializando repositório Git..."
+cd $BASE_DIR
+if [ ! -d ".git" ]; then
+  git init
+  git add docker-compose.yml
+  git commit -m "Initial commit: WireGuard + AdGuard/Unbound setup"
+fi
+
+# Subir containers
+info "Subindo containers..."
+docker compose up -d
+
+echo -e "${CYAN}=========================================${RESET}"
+echo -e "${GREEN}✔ Configuração concluída com sucesso!${RESET}"
+echo -e "${CYAN}=========================================${RESET}"
